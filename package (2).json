@@ -1,0 +1,15 @@
+{
+  "name": "panda-wars",
+  "version": "2.0.0",
+  "description": "Panda Wars - Multiplayer Chef Season Battle Royale",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
