@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: panda-wars
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
