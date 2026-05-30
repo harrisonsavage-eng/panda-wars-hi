@@ -365,7 +365,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
         <span class="gt">HP</span>
         <div class="bw"><div class="bar" id="hpb" style="width:100%"></div></div>
         <div class="bw"><div class="bar" id="shb" style="width:100%"></div></div>
-        <span class="gt" id="g-wpn">Butter Knife</span>
+        <span class="gt" id="g-wpn">—</span>
         <span class="gt sm2" id="g-ammo">Ammo: 30/30</span>
       </div>
       <div class="gcol r">
@@ -382,7 +382,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
       <div class="wpn-slot" id="slot1"><span id="slot1-e">—</span><span class="wpn-slot-ammo" id="slot1-a"></span></div>
       <div class="wpn-slot" id="slot2"><span id="slot2-e">—</span><span class="wpn-slot-ammo" id="slot2-a"></span></div>
     </div>
-    <div id="chint">WASD/joystick=move · SPACE/🔴=shoot · E=loot/heal · R=reload · F=enter/exit vehicle</div>
+    <div id="chint">WASD=move · SPACE=shoot/hack · E=loot/heal · R=reload · F=vault/vehicle</div>
     <div id="govl">
       <div style="font-size:50px">🐼🍳</div>
       <h2 style="color:#fff">PANDA WARS: CHEF SEASON</h2>
@@ -707,8 +707,16 @@ var ALL_WEAPONS_BY_SEASON = {
 var WEAPONS = ALL_WEAPONS_BY_SEASON[CURRENT_SEASON.id];
 
 function getWpn(id){return WEAPONS.find(function(w){return w.id===id;})||WEAPONS[0];}
-function mkW(idx){var w=WEAPONS[idx];return {id:w.id,name:w.name,emoji:w.emoji,type:w.type,dmg:w.dmg,rate:w.rate,maxAmmo:w.maxAmmo,range:w.range,spd:w.spd,bullet:w.bullet,aoe:w.aoe,homing:w.homing,rarity:w.rarity,ammo:w.maxAmmo};}
-function mkWbyId(id){var idx=WEAPONS.findIndex(function(w){return w.id===id;});return mkW(idx<0?0:idx);}
+function mkW(idx){
+  var w=WEAPONS[idx]||WEAPONS[0];
+  return {id:w.id,name:w.name,emoji:w.emoji,type:w.type,dmg:w.dmg,rate:w.rate,maxAmmo:w.maxAmmo,range:w.range,spd:w.spd,bullet:w.bullet,aoe:w.aoe,homing:w.homing,rarity:w.rarity,ammo:w.maxAmmo};
+}
+function mkWbyId(id){
+  // Special case: onetap is not in WEAPONS array
+  if(id==='onetap') return Object.assign({},ONE_TAP_WPN,{ammo:ONE_TAP_WPN.maxAmmo});
+  var idx=WEAPONS.findIndex(function(w){return w.id===id;});
+  return mkW(idx<0?0:idx);
+}
 
 var RARITY_COL={common:'var(--muted)',rare:'var(--blue)',epic:'var(--purple)',legendary:'var(--gold)'};
 var TYPE_MAP={melee:'type-melee',ranged:'type-ranged',thrown:'type-thrown',explosive:'type-explosive',magic:'type-magic'};
@@ -1158,7 +1166,9 @@ var PW=MW*TILE,PH=MH*TILE,SCX=PW/2,SCY=PH/2,SPD=3.3;
 var gc2=el('gc'),gctx=gc2.getContext('2d');
 gc2.width=GW;gc2.height=GH;
 
-var gP,gBots,gBullets,gLoot,gParts,gCorpses,gChests,gExplosions,gHealItems,gVehicles;
+var gP,gBots,gBullets,gLoot,gParts,gCorpses,gChests,gExplosions,gHealItems,gVehicles,gVaults;
+var gHacking=null; // {vault, angle, speed, zoneStart, zoneEnd, success}
+var gHackBot=null; // bot currently hacking
 var gStormR,gStormT,gCamX,gCamY;
 var gOver=false,gFrm=null,gLast=0;
 var gGameStartTime=0,gInStormFlash=0;
@@ -1231,6 +1241,47 @@ function makeVehicles(){
   return out;
 }
 
+// ONE-TAP WEAPON — only obtainable from vaults
+var ONE_TAP_WPN={id:'onetap',name:'Shadow Katana ONE-TAP',emoji:'⚡',type:'melee',
+  dmg:9999,rate:45,maxAmmo:1,range:95,spd:0,bullet:'#fff',aoe:0,homing:false,rarity:'legendary',
+  desc:'Instant kill. One slash ends it all. Vault exclusive.'};
+
+var VAULT_COLORS=['#ff4444','#44aaff','#44ff88','#ffaa00','#cc44ff'];
+
+function makeVaults(){
+  var out=[];
+  // Spawn 5 vaults spread across map
+  for(var i=0;i<5;i++){
+    var p=freePos();
+    out.push({
+      x:p.x, y:p.y, id:i,
+      alive:true,          // can be hacked
+      hacked:false,        // already looted
+      zoneStart: rnd(0, Math.PI*2),    // coloured zone start angle
+      zoneSize:  rnd(0.35, 0.65),      // size of green zone (radians)
+      lineSpeed: rnd(1.5, 3.0),        // spin speed rad/s
+      color: VAULT_COLORS[i%VAULT_COLORS.length],
+      pulse:0,
+      botHackTimer:0,      // AI hack countdown
+    });
+  }
+  return out;
+}
+
+function startHacking(vault){
+  gHacking={
+    vault:vault,
+    angle:0,              // spinning line angle
+    zoneStart:vault.zoneStart,
+    zoneEnd:vault.zoneStart+vault.zoneSize,
+    speed:vault.lineSpeed,
+    flashTimer:0,
+    failed:false,
+  };
+}
+
+function stopHacking(){gHacking=null;}
+
 // HEAL ITEMS - scattered across map
 var HEAL_TYPES=[
   {id:'bandage',  name:'Bandage',     emoji:'🩹', amount:25,  col:'#ff8888', desc:'+25 HP'},
@@ -1258,7 +1309,11 @@ function makeHealItems(){
   return out;
 }
 
-function makeInv(wpnId){return [mkWbyId(wpnId),null,null];}
+function makeInv(wpnId){
+  // Use provided ID if it exists in current season, otherwise use first weapon
+  var idx=WEAPONS.findIndex(function(w){return w.id===wpnId;});
+  return [mkW(idx<0?0:idx),null,null];
+}
 
 function makePlayer(emoji){
   var p=freePos();
@@ -1295,6 +1350,8 @@ function startGame(){
   gChests=makeChests();
   gHealItems=makeHealItems();
   gVehicles=makeVehicles();
+  gVaults=makeVaults();
+  gHacking=null;gHackBot=null;
   gInVehicle=null;gKillCamActive=false;gKillCamTarget=null;
   el('killcam-overlay').style.display='none';
   el('vehicle-hud').style.display='none';
@@ -1366,8 +1423,13 @@ function killEnt(t,byPlayer,owner){
   gCorpses.push({x:t.x,y:t.y,emoji:t.emoji,bc:t.bc,pc:t.pc,face:t.face,
     headOffY:-22,headVY:-7,headRot:0,headRotV:rnd(-.25,.25),
     fallAngle:0,fallSpd:.05,fallen:false,fade:14,timer:0});
-  var dropped=t.inv.find(function(w){return w!==null;});
-  if(dropped)gLoot.push({x:t.x+rnd(-20,20),y:t.y+rnd(-20,20),wpnId:dropped.id,alive:true});
+  var dropped=t.inv.find(function(w){return w!==null&&w.id!=='onetap';});
+  if(dropped){
+    // Make sure this weapon ID exists in current season before dropping
+    var dropIdx=WEAPONS.findIndex(function(w){return w.id===dropped.id;});
+    var dropId=dropIdx>=0?dropped.id:WEAPONS[0].id;
+    gLoot.push({x:t.x+rnd(-20,20),y:t.y+rnd(-20,20),wpnId:dropId,alive:true});
+  }
   var name=t.name||'Enemy';
   addKF((byPlayer?'🔪 You':'💀 Enemy')+' cooked '+name+'!');
   if(byPlayer){gP.kills++;gMatchKills++;}
@@ -1402,9 +1464,9 @@ function tryMove(e,dx,dy){
 }
 function inStorm(e){return dst(e,{x:SCX,y:SCY})>gStormR;}
 
-function pickupWpn(ent,wpnId){
-  // find empty slot or replace active
-  var w=mkWbyId(wpnId);
+function pickupWpn(ent,wpnId,wpnObj){
+  // Accept either a weapon ID string or a direct weapon object
+  var w=wpnObj?wpnObj:mkWbyId(wpnId);
   for(var i=0;i<3;i++){if(ent.inv[i]===null){ent.inv[i]=w;return i;}}
   ent.inv[ent.activeSlot]=w;return ent.activeSlot;
 }
@@ -1441,20 +1503,30 @@ function gUpdate(dt){
   // F key or mobile vehicle btn = enter/exit
   if((gKeys['f']||gKeys['F'])&&!gKeys['_fHeld']){
     gKeys['_fHeld']=true;
-    if(gInVehicle){
+    if(gHacking){
+      // Cancel hacking
+      stopHacking();
+    } else if(gInVehicle){
       // Exit vehicle
       gInVehicle.rider=null;gInVehicle=null;
       el('vehicle-hud').style.display='none';
     } else {
-      // Find nearest vehicle
-      var nearV=null,nearVD=9999;
-      for(var vi=0;vi<gVehicles.length;vi++){
-        var vv=gVehicles[vi];
-        if(!vv.alive||vv.rider)continue;
-        var vd=dst(gP,vv);
-        if(vd<60&&vd<nearVD){nearVD=vd;nearV=vv;}
+      // Check vault first (priority over vehicle)
+      var nearVault=null,nearVD2=9999;
+      if(gVaults){for(var vj=0;vj<gVaults.length;vj++){var vv2=gVaults[vj];if(vv2.alive&&!vv2.hacked){var vd2=dst(gP,vv2);if(vd2<60&&vd2<nearVD2){nearVD2=vd2;nearVault=vv2;}}}}
+      if(nearVault){
+        startHacking(nearVault);
+      } else {
+        // Try vehicle
+        var nearV=null,nearVD=9999;
+        for(var vi=0;vi<gVehicles.length;vi++){
+          var vv=gVehicles[vi];
+          if(!vv.alive||vv.rider)continue;
+          var vd=dst(gP,vv);
+          if(vd<60&&vd<nearVD){nearVD=vd;nearV=vv;}
+        }
+        if(nearV){gInVehicle=nearV;nearV.rider=gP;el('vehicle-hud').style.display='block';}
       }
-      if(nearV){gInVehicle=nearV;nearV.rider=gP;el('vehicle-hud').style.display='block';}
     }
   }
   if(!gKeys['f']&&!gKeys['F'])gKeys['_fHeld']=false;
@@ -1507,7 +1579,7 @@ function gUpdate(dt){
         ch.alive=false;
         var slot=pickupWpn(gP,ch.wpnId);
         addParts(ch.x,ch.y,'#EF9F27',12,4);
-        addKF('Opened chest: got '+mkWbyId(ch.wpnId).name+'!');
+        var _cw=mkWbyId(ch.wpnId);addKF('Opened chest: got '+(_cw?_cw.name:'weapon')+'!');
         break;
       }
     }
@@ -1516,7 +1588,7 @@ function gUpdate(dt){
       if(lt.alive&&dst(gP,lt)<36){
         lt.alive=false;
         pickupWpn(gP,lt.wpnId);
-        addKF('Picked up '+mkWbyId(lt.wpnId).name);
+        var _lw=mkWbyId(lt.wpnId);addKF('Picked up '+(_lw?_lw.name:'item'));
         break;
       }
     }
@@ -1696,6 +1768,73 @@ function gUpdate(dt){
   gCamX=Math.max(0,Math.min(PW-GW,gP.x-GW/2));
   gCamY=Math.max(0,Math.min(PH-GH,gP.y-GH/2));
 
+  // ── VAULT MINIGAME ────────────────────────────────────────────
+  if(gVaults){
+    for(var vi2=0;vi2<gVaults.length;vi2++){
+      var vt=gVaults[vi2];
+      if(!vt.alive)continue;
+      vt.pulse+=dt*2;
+
+      // Bot AI — hack vault if nearby and not already hacking
+      if(!vt.hacked){
+        for(var bi2=0;bi2<gBots.length;bi2++){
+          var bot2=gBots[bi2];if(bot2.dead)continue;
+          if(dst(bot2,vt)<50&&gHackBot!==bot2){
+            vt.botHackTimer=(vt.botHackTimer||0)+dt;
+            // Bot takes 2.5s to hack (slower than player can if skilled)
+            if(vt.botHackTimer>2.5){
+              vt.botHackTimer=0;
+              vt.hacked=true;vt.alive=false;
+              // Give bot the one-tap weapon
+              bot2.inv[0]={...ONE_TAP_WPN,ammo:ONE_TAP_WPN.maxAmmo};
+              addKF('⚡ '+bot2.name+' hacked the vault!');
+              addParts(vt.x,vt.y,'#ffaa00',20,5);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Player hack minigame update
+  if(gHacking){
+    var hk=gHacking;
+    hk.angle=(hk.angle+hk.speed*dt)%(Math.PI*2);
+    if(hk.flashTimer>0)hk.flashTimer-=dt;
+
+    // SPACE to attempt hack
+    if(gKeys[' ']&&!gKeys['_hackPressed']){
+      gKeys['_hackPressed']=true;
+      // Normalise angles
+      var a=hk.angle;
+      var zs=hk.zoneStart%(Math.PI*2);
+      var ze=hk.zoneEnd%(Math.PI*2);
+      var hit=false;
+      if(ze>zs){ hit=a>=zs&&a<=ze; }
+      else { hit=a>=zs||a<=ze; } // wraps around 0
+      if(hit){
+        // SUCCESS
+        var vault=hk.vault;
+        vault.hacked=true;vault.alive=false;
+        stopHacking();
+        // Give player one-tap weapon
+        pickupWpn(gP,null,{...ONE_TAP_WPN,ammo:ONE_TAP_WPN.maxAmmo});
+        addKF('⚡ VAULT HACKED! Shadow Katana ONE-TAP equipped!');
+        addParts(vault.x,vault.y,'#ffaa00',30,6);
+        addParts(vault.x,vault.y,'#ffffff',15,4);
+      } else {
+        // MISS — flash red, reset angle, speed up slightly
+        hk.failed=true;hk.flashTimer=0.3;
+        hk.angle=0;hk.speed=Math.min(5,hk.speed+0.4);
+        addKF('Miss! Try again — it\'s speeding up!');
+      }
+    }
+    if(!gKeys[' '])gKeys['_hackPressed']=false;
+
+    // F to cancel hacking
+    if(gKeys['f']||gKeys['F']){stopHacking();}
+  }
+
   if(gP.hp<=0&&!gOver){gOver=true;setTimeout(function(){endGame(false);},700);}
   var aliveN=gBots.filter(function(b){return !b.dead;}).length+1;
   if(aliveN===1&&!gOver){gOver=true;setTimeout(function(){endGame(true);},700);}
@@ -1833,7 +1972,7 @@ function gRender(){
     ctx.globalAlpha=glow;ctx.font='20px serif';ctx.textAlign='center';ctx.textBaseline='middle';
     ctx.fillText('📦',csx2,csy2);ctx.globalAlpha=1;
     ctx.fillStyle='rgba(255,200,50,.6)';ctx.font='8px Nunito,sans-serif';ctx.textAlign='center';
-    ctx.fillText(mkWbyId(ch.wpnId).emoji,csx2,csy2-16);
+    var _ce=mkWbyId(ch.wpnId);ctx.fillText(_ce?_ce.emoji:'🎁',csx2,csy2-16);
   }
 
   // loot
@@ -1841,8 +1980,8 @@ function gRender(){
     var lt=gLoot[li];if(!lt.alive)continue;
     var lsx=lt.x-gCamX,lsy=lt.y-gCamY;
     if(lsx<-30||lsx>GW+30||lsy<-30||lsy>GH+30)continue;
-    ctx.font='16px serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(mkWbyId(lt.wpnId).emoji,lsx,lsy);
-    ctx.fillStyle='rgba(255,255,180,.7)';ctx.font='8px Nunito,sans-serif';ctx.fillText(mkWbyId(lt.wpnId).name,lsx,lsy-14);
+    ctx.font='16px serif';ctx.textAlign='center';ctx.textBaseline='middle';var _le=mkWbyId(lt.wpnId);ctx.fillText(_le?_le.emoji:'📦',lsx,lsy);
+    ctx.fillStyle='rgba(255,255,180,.7)';ctx.font='8px Nunito,sans-serif';ctx.fillText(_le?_le.name:'item',lsx,lsy-14);
   }
 
   // heal items
@@ -2052,6 +2191,93 @@ function gRender(){
 
   // blind overlay
   if(gP.blind>0){ctx.fillStyle='rgba(255,255,200,'+Math.min(.85,gP.blind*.7)+')';ctx.fillRect(0,0,GW,GH);}
+
+  // ── DRAW VAULTS ──────────────────────────────────────────────
+  if(gVaults){
+    for(var vri2=0;vri2<gVaults.length;vri2++){
+      var vt2=gVaults[vri2];if(!vt2.alive)continue;
+      var vx=vt2.x-gCamX,vy=vt2.y-gCamY;
+      if(vx<-60||vx>GW+60||vy<-60||vy>GH+60)continue;
+      var pulse2=Math.sin(vt2.pulse)*0.3+0.7;
+      // Vault body — armoured crate
+      ctx.save();ctx.translate(vx,vy);
+      // Glow
+      ctx.globalAlpha=pulse2*0.4;
+      ctx.fillStyle=vt2.color;
+      ctx.beginPath();ctx.arc(0,0,28,0,Math.PI*2);ctx.fill();
+      ctx.globalAlpha=1;
+      // Body
+      ctx.fillStyle='#333';ctx.fillRect(-18,-18,36,36);
+      ctx.fillStyle='#444';ctx.fillRect(-16,-16,32,32);
+      // Steel bands
+      ctx.fillStyle='#666';ctx.fillRect(-18,-4,36,4);
+      ctx.fillRect(-4,-18,4,36);
+      // Lock
+      ctx.fillStyle=vt2.color;
+      ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#222';ctx.fillRect(-3,-1,6,7);
+      // Keyhole
+      ctx.fillStyle='#111';
+      ctx.beginPath();ctx.arc(0,-1,3,0,Math.PI*2);ctx.fill();
+      ctx.fillRect(-1.5,0,3,5);
+      // Corner bolts
+      ctx.fillStyle='#888';
+      [[-14,-14],[14,-14],[-14,14],[14,14]].forEach(function(b){ctx.beginPath();ctx.arc(b[0],b[1],3,0,Math.PI*2);ctx.fill();});
+      ctx.restore();
+      // Label if nearby
+      if(dst(gP,vt2)<120){
+        ctx.fillStyle='rgba(0,0,0,.7)';ctx.fillRect(vx-36,vy-44,72,16);
+        ctx.fillStyle=vt2.color;ctx.font='bold 9px Nunito,sans-serif';ctx.textAlign='center';
+        ctx.fillText('[F] HACK VAULT — ⚡ ONE-TAP',vx,vy-33);
+      }
+    }
+  }
+
+  // ── HACK MINIGAME OVERLAY ────────────────────────────────────
+  if(gHacking){
+    var hk2=gHacking;
+    var cx3=GW/2,cy3=GH/2,R=90,rInner=55;
+    // Dark backdrop
+    ctx.fillStyle='rgba(0,0,0,.6)';ctx.fillRect(cx3-140,cy3-140,280,280);
+    // Title
+    ctx.fillStyle='#fff';ctx.font='bold 13px Nunito,sans-serif';ctx.textAlign='center';
+    ctx.fillText('HACKING VAULT...',cx3,cy3-118);
+    ctx.fillStyle='#aaa';ctx.font='10px Nunito,sans-serif';
+    ctx.fillText('Press SPACE when line hits the coloured zone',cx3,cy3-104);
+    // Outer ring
+    ctx.strokeStyle='#444';ctx.lineWidth=14;
+    ctx.beginPath();ctx.arc(cx3,cy3,R,0,Math.PI*2);ctx.stroke();
+    // Coloured success zone
+    var flash=hk2.flashTimer>0;
+    ctx.strokeStyle=flash?'#ff4444':hk2.vault.color;ctx.lineWidth=14;
+    ctx.beginPath();ctx.arc(cx3,cy3,R,hk2.zoneStart,hk2.zoneEnd);ctx.stroke();
+    // Inner ring
+    ctx.strokeStyle='#333';ctx.lineWidth=4;
+    ctx.beginPath();ctx.arc(cx3,cy3,rInner,0,Math.PI*2);ctx.stroke();
+    // Spinning line
+    ctx.strokeStyle=flash?'#ff4444':'#ffffff';ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(cx3+Math.cos(hk2.angle)*rInner,cy3+Math.sin(hk2.angle)*rInner);
+    ctx.lineTo(cx3+Math.cos(hk2.angle)*R,cy3+Math.sin(hk2.angle)*R);
+    ctx.stroke();
+    // Glow on line tip
+    ctx.fillStyle=flash?'#ff4444':'#fff';
+    ctx.beginPath();ctx.arc(cx3+Math.cos(hk2.angle)*R,cy3+Math.sin(hk2.angle)*R,5,0,Math.PI*2);ctx.fill();
+    // Centre lock icon
+    ctx.font='22px serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('🔐',cx3,cy3);
+    // Instruction
+    ctx.fillStyle=flash?'#ff4444':'#ffdd44';ctx.font='bold 11px Nunito,sans-serif';ctx.textBaseline='alphabetic';
+    ctx.fillText(flash?'MISSED! Speeding up...':'SPACE to hack  ·  F to cancel',cx3,cy3+122);
+    // Speed indicator dots
+    var dots=Math.min(5,Math.floor(hk2.speed));
+    for(var di=0;di<5;di++){
+      ctx.fillStyle=di<dots?'#ff4444':'#333';
+      ctx.beginPath();ctx.arc(cx3-20+di*10,cy3+108,4,0,Math.PI*2);ctx.fill();
+    }
+    ctx.fillStyle='#888';ctx.font='9px Nunito,sans-serif';ctx.textAlign='center';
+    ctx.fillText('SPEED',cx3,cy3+120);
+  }
   if(inStorm(gP)){
     // Pulsing red damage overlay when in storm
     ctx.fillStyle='rgba(200,0,0,'+Math.min(0.35, gInStormFlash*0.35)+')';
